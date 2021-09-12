@@ -11,6 +11,7 @@ import shutil
 from PIL import Image
 import requests
 import torch
+import numpy as np
 from torch import nn
 from torch.nn import functional as F
 from torchvision import transforms
@@ -22,6 +23,7 @@ sys.path.append('./CLIP')
 
 import clip
 from guided_diffusion.script_util import create_model_and_diffusion, model_and_diffusion_defaults
+from guided_diffusion.simple_diffusion import SimpleDiffusion
 
 # Define necessary functions
 
@@ -34,6 +36,13 @@ def fetch(url_or_path):
         fd.seek(0)
         return fd
     return open(url_or_path, 'rb')
+
+def fetch_model(url):
+    basename = os.path.basename(url)
+    if not os.path.exists(f'models/{basename}'):
+        os.makedirs('models', exist_ok=True)
+        os.system(f'curl -o models/{basename} {url}')
+    return f'models/{basename}'
 
 class MakeCutouts(nn.Module):
     def __init__(self, cut_size, cutn, cut_pow=1.):
@@ -84,10 +93,9 @@ model_config = model_and_diffusion_defaults()
 model_config.update({
     'attention_resolutions': '32, 16, 8',
     'class_cond': False,
-    'diffusion_steps': 1000,
-    'rescale_timesteps': True,
-    'timestep_respacing': '1000',  # Modify this value to decrease the number of
-                                   # timesteps.
+    'diffusion_steps': 1000, # ignored
+    'rescale_timesteps': True, # ignored
+    'timestep_respacing': '1000', # ignored
     'image_size': 256,
     'learn_sigma': True,
     'noise_schedule': 'linear',
@@ -104,8 +112,8 @@ model_config.update({
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
 
-model, diffusion = create_model_and_diffusion(**model_config)
-model.load_state_dict(torch.load('models/256x256_diffusion_uncond.pt', map_location='cpu'))
+model, _ = create_model_and_diffusion(**model_config)
+model.load_state_dict(torch.load(fetch_model('https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt'), map_location='cpu'))
 model.requires_grad_(False).eval().to(device)
 for name, param in model.named_parameters():
     if 'qkv' in name or 'norm' in name or 'proj' in name:
@@ -118,19 +126,23 @@ clip_size = clip_model.visual.input_resolution
 normalize = transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
                                  std=[0.26862954, 0.26130258, 0.27577711])
 
+# Use SimpleDiffusion instead of the regular one
+diffusion = SimpleDiffusion(device, schedule_name=model_config['noise_schedule'])
+
 
 ## Settings for this run:
 
-title = "a fiery demon"
-prompt = txt("a fiery demon")
+title = "A White vanilla Strawberry Shortcake on top of table"
+prompt = txt(title)
 batch_size = 1
 clip_guidance_scale = 1000  # Controls how much the image should look like the prompt.
 tv_scale = 150              # Controls the smoothness of the final output.
 cutn = 16
 n_batches = 1
-init_image = None   # This can be an URL or Colab local path and must be in quotes.
-skip_timesteps = 0  # This needs to be between approx. 200 and 500 when using an init image.
-                    # Higher values make the output look more like the init.
+init_image = 'https://media.discordapp.net/attachments/730484623028519072/886530738516807740/1631434453104.jpg'   # This can be an URL or Colab local path and must be in quotes.
+skip_timesteps = 500  # This needs to be between approx. 200 and 500 when using an init image.
+                      # Higher values make the output look more like the init.
+schedule = list(reversed(range(0, 1000 - skip_timesteps + 1, 1)))
 seed = 0
 
 ## Actually do the run...
@@ -149,24 +161,19 @@ def run():
 
     make_cutouts = MakeCutouts(clip_size, cutn)
 
-    cur_t = None
-
     def cond_fn(x, t, y=None):
         with torch.enable_grad():
             x = x.detach().requires_grad_()
-            print('x:', x.requires_grad)
             n = x.shape[0]
-            my_t = torch.ones([n], device=device, dtype=torch.long) * cur_t
-            out = diffusion.p_mean_variance(model, x, my_t, clip_denoised=False, model_kwargs={'y': y})
-            fac = diffusion.sqrt_one_minus_alphas_cumprod[cur_t]
-            x_in = out['pred_xstart'] * fac + x * (1 - fac)
+            pred_xstart = diffusion.p_xstart(model, x, t)
+            fac = np.sqrt(1 - diffusion.alpha(t))
+            x_in = pred_xstart * fac + x * (1 - fac)
             clip_in = normalize(make_cutouts(x_in.add(1).div(2)))
             image_embeds = clip_model.encode_image(clip_in).float().reshape([cutn, n, -1])
             dists = spherical_dist_loss(image_embeds, text_embed.unsqueeze(0))
             losses = dists.mean(0)
             tv_losses = tv_loss(x_in)
             loss = losses.sum() * clip_guidance_scale + tv_losses.sum() * tv_scale
-            print('loss:', loss.requires_grad)
             grad = -torch.autograd.grad(loss, x)[0]
         # Gradient clipping before returning
         magnitude = grad.square().mean().sqrt()
@@ -174,22 +181,24 @@ def run():
 
     for i in range(n_batches):
         timestring = time.strftime('%Y%m%d%H%M%S')
-        cur_t = diffusion.num_timesteps - skip_timesteps - 1
 
         samples = diffusion.p_sample_loop_progressive(
             model,
             (batch_size, 3, model_config['image_size'], model_config['image_size']),
-            clip_denoised=False,
-            model_kwargs={},
-            cond_fn=cond_fn,
-            progress=True,
-            skip_timesteps=skip_timesteps,
-            init_image=init,
+            schedule = schedule,
+            cond_fn = cond_fn,
+            init_image = init,
+            eta=1.0 # 1.0=ddpm, 0.0=ddim
+            # clip_denoised=False,
+            # model_kwargs={},
+            # cond_fn=cond_fn,
+            # progress=True,
+            # skip_timesteps=skip_timesteps,
+            # init_image=init,
         )
 
         for j, sample in enumerate(samples):
-            cur_t -= 1
-            if j % 100 == 0 or cur_t == -1:
+            if j % 100 == 0 or j == len(schedule)-2:
                 print()
                 for k, image in enumerate(sample['pred_xstart']):
                     filename = f'progress_{i * batch_size + k:05}.png'
