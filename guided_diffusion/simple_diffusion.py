@@ -1,7 +1,6 @@
 import enum
 import math
 
-from tqdm import tqdm
 import numpy as np
 import torch
 
@@ -172,7 +171,7 @@ class SimpleDiffusion(object):
         return np.sqrt(a2) * xstart + np.sqrt(1 - a2) * adjust, xstart0
 
     @torch.no_grad()
-    def p_sample_loop_progressive(self, model, shape, init_image=None, schedule=None, cond_fn=None, eta=1.0, init_mask=None):
+    def p_sample_loop_progressive(self, model, shape, init_image=None, schedule=None, cond_fn=None, eta=1.0, init_mask=None, progress=None):
         if schedule is None:
             schedule = reversed(range(self.diffusion_steps + 1)) # [T..0]
         schedule = list(schedule)
@@ -183,7 +182,9 @@ class SimpleDiffusion(object):
         else:
             image = self.q_sample(init_image.broadcast_to(shape), 0, schedule[0])
 
-        for (t1, t2) in tqdm(timesteps):
+
+
+        for (t1, t2) in (progress(timesteps) if progress else timesteps):
             if t1 == t2:
                 continue
             image, pred_xstart = self.p_sample(model, image, t1, t2, cond_fn=cond_fn, eta=eta)

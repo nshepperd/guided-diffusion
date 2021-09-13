@@ -228,7 +228,8 @@ def run():
             cond_fn = cond_fn,
             init_image = init,
             eta=eta,
-            init_mask = init_mask
+            init_mask = init_mask,
+            progress = tqdm
         )
 
         for j, sample in enumerate(samples):
