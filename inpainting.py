@@ -96,7 +96,7 @@ model_config.update({
     'diffusion_steps': 1000, # ignored
     'rescale_timesteps': True, # ignored
     'timestep_respacing': '1000', # ignored
-    'image_size': 512,
+    'image_size': 256,
     'learn_sigma': True,
     'noise_schedule': 'linear',
     'num_channels': 256,
@@ -110,13 +110,18 @@ model_config.update({
 url_256x256_uncond = 'https://openaipublic.blob.core.windows.net/diffusion/jul-2021/256x256_diffusion_uncond.pt'
 url_512x512_uncond = 'https://the-eye.eu/public/AI/models/512x512_diffusion_unconditional_ImageNet/512x512_diffusion_uncond_finetune_008100.pt'
 
+if model_config['image_size'] == 512:
+    model_url = url_512x512_uncond
+else:
+    model_url = url_256x256_uncond
+
 # Load models
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 print('Using device:', device)
 
 model, _ = create_model_and_diffusion(**model_config)
-model.load_state_dict(torch.load(fetch_model(url_512x512_uncond), map_location='cpu'))
+model.load_state_dict(torch.load(fetch_model(model_url), map_location='cpu'))
 model.requires_grad_(False).eval().to(device)
 for name, param in model.named_parameters():
     if 'qkv' in name or 'norm' in name or 'proj' in name:
@@ -144,18 +149,20 @@ def make_schedule(t_start, t_end, step_size=1):
 
 ## Settings for this run:
 
-title = 'a goose wearing a lab coat'
+title = "shutterstock watermark removal"
 prompt = txt(title)
 batch_size = 1
-clip_guidance_scale = 1000  # Controls how much the image should look like the prompt.
-tv_scale = 150              # Controls the smoothness of the final output.
-eta = 1.1 # 0.0: ddim. 1.0: ddpm. between 1.0 and 2.0: extra noisy
-cutn = 64
+clip_guidance_scale = 0  # Controls how much the image should look like the prompt.
+tv_scale = 150           # Controls the smoothness of the final output.
+mask_scale = 1000
+eta = 1.0 # 0.0: ddim. 1.0: ddpm. between 1.0 and 2.0: extra noisy
+cutn = 16
 n_batches = 1
-init_image = 'https://media.discordapp.net/attachments/730484623028519072/886890032802181150/progress_00000.png'
-skip_timesteps = 700  # This needs to be between approx. 200 and 500 when using an init image.
+init_image = 'examples/inpainting_goose.png'
+skip_timesteps = 0  # This needs to be between approx. 200 and 500 when using an init image.
                       # Higher values make the output look more like the init.
-schedule = make_schedule(1000 - skip_timesteps, 0, 0.5)
+schedule = make_schedule(1000 - skip_timesteps, 0, 1)
+# schedule = make_schedule(1000, 500) + make_schedule(500, 250, 0.5) + make_schedule(250, 0, 0.25)
 seed = 0
 
 ## Actually do the run...
@@ -169,12 +176,22 @@ def run():
     text_embed = prompt
 
     init = None
+    init_mask = None
     if init_image is not None:
-        init = Image.open(fetch(init_image)).convert('RGB')
-        init = init.resize((model_config['image_size'], model_config['image_size']), Image.LANCZOS)
-        init = TF.to_tensor(init).to(device).unsqueeze(0).mul(2).sub(1)
+        S = model_config['image_size']
+        init = Image.open(fetch(init_image)).convert('RGBA')
+        init = init.resize((S, S), Image.BILINEAR)
+        init = TF.to_tensor(init).to(device)
+        init_mask = init[3] # alpha channel
+        init_mask = (init_mask>0.5).to(torch.float32)
+        init = init[:3].unsqueeze(0).mul(2).sub(1) # RGB
 
     make_cutouts = MakeCutouts(clip_size, cutn)
+
+    def mask_xstart(img):
+        if init_mask is not None:
+            img = init_mask.sqrt() * init + (1 - init_mask).sqrt() * img
+        return img
 
     def cond_fn(x, t, y=None):
         with torch.enable_grad():
@@ -182,7 +199,7 @@ def run():
             n = x.shape[0]
             pred_xstart = diffusion.p_xstart(model, x, t)
             fac = np.sqrt(1 - diffusion.alpha(t))
-            x_in = pred_xstart * fac + x * (1 - fac)
+            x_in = mask_xstart(pred_xstart) * fac + x * (1 - fac)
             if clip_guidance_scale > 0:
                 clip_in = normalize(make_cutouts(x_in.add(1).div(2)))
                 image_embeds = clip_model.encode_image(clip_in).float().reshape([cutn, n, -1])
@@ -191,10 +208,14 @@ def run():
             else:
                 losses = torch.zeros([], device=x.device)
             tv_losses = tv_loss(x_in)
-            loss = losses.sum() * clip_guidance_scale + tv_losses.sum() * tv_scale
+            mask_losses = (init_mask * (pred_xstart - init)).square().mean((1,2,3))
+            loss = (losses.sum() * clip_guidance_scale
+                    + tv_losses.sum() * tv_scale
+                    + mask_losses.sum() * mask_scale / (1 - diffusion.alpha(t)))
             grad = -torch.autograd.grad(loss, x)[0]
         # Gradient clipping before returning
         magnitude = grad.square().mean().sqrt()
+        print(f't={t}, magnitude={magnitude.item()}, variance={1 - diffusion.alpha(t)}, mask_loss={mask_losses.mean().item()}')
         return grad * magnitude.clamp(max=0.2) / magnitude
 
     for i in range(n_batches):
@@ -207,6 +228,7 @@ def run():
             cond_fn = cond_fn,
             init_image = init,
             eta=eta,
+            init_mask = init_mask
         )
 
         for j, sample in enumerate(samples):
@@ -216,11 +238,10 @@ def run():
                     pil_image = TF.to_pil_image(image.add(1).div(2).clamp(0, 1))
                     filename = f'progress/progress_{i * batch_size + k:05}_{j:04}.png'
                     pil_image.save(filename)
-                    pil_image.save(f'progress/progress_{i * batch_size + k:05}_last.png')
                     tqdm.write(f'Wrote batch {i}, step {j}, output {k} to {filename}')
 
         for k in range(batch_size):
-            filename = f'progress/progress_{i * batch_size + k:05}_last.png'
+            filename = f'progress_{i * batch_size + k:05}.png'
             final_name = f'samples/{timestring}_{k}_{title}.png'
             shutil.copyfile(filename, final_name)
 

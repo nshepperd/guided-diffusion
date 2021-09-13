@@ -148,6 +148,8 @@ class SimpleDiffusion(object):
         a1 = self.alpha(t1)
         a2 = self.alpha(t2)
 
+        # "Diffusion Models Beat GANs on Image Synthesis" page 7-8.
+        # Conditioning for DDIM
         eps0 = eps
         if cond_fn is not None:
             eps = eps - np.sqrt(1 - a1) * cond_fn(x, t1)
@@ -155,17 +157,22 @@ class SimpleDiffusion(object):
         if noise is None:
             noise = torch.randn_like(x)
 
-        xstart0 = (x - np.sqrt(1 - a1) * eps0) / np.sqrt(a1)
-
-        # xstart0 is unconditional. xstart includes cond_fn conditioning
+        # "Denoising Diffusion Implicit Models" formula 12
         xstart = (x - np.sqrt(1 - a1) * eps) / np.sqrt(a1)
-        sigma2 = eta * (1 - a1/a2) / (1 - a1)
+
+        ddpm_sigma2 = (1 - a1/a2) / (1 - a1)
+        if eta <= 1.0:
+            sigma2 = eta * ddpm_sigma2
+        else:
+            sigma2 = ddpm_sigma2 + (eta-1) * (1 - ddpm_sigma2)
         adjust = np.sqrt(1 - sigma2) * eps + np.sqrt(sigma2) * noise
 
+        # Generate the unconditional xstart for output using the original epsilon
+        xstart0 = (x - np.sqrt(1 - a1) * eps0) / np.sqrt(a1)
         return np.sqrt(a2) * xstart + np.sqrt(1 - a2) * adjust, xstart0
 
     @torch.no_grad()
-    def p_sample_loop_progressive(self, model, shape, init_image=None, schedule=None, cond_fn=None, eta=1.0):
+    def p_sample_loop_progressive(self, model, shape, init_image=None, schedule=None, cond_fn=None, eta=1.0, init_mask=None):
         if schedule is None:
             schedule = reversed(range(self.diffusion_steps + 1)) # [T..0]
         schedule = list(schedule)
@@ -177,5 +184,10 @@ class SimpleDiffusion(object):
             image = self.q_sample(init_image.broadcast_to(shape), 0, schedule[0])
 
         for (t1, t2) in tqdm(timesteps):
+            if t1 == t2:
+                continue
             image, pred_xstart = self.p_sample(model, image, t1, t2, cond_fn=cond_fn, eta=eta)
+            if init_mask is not None and t2 > 0:
+                noisy_init = self.q_sample(init_image.broadcast_to(shape), 0, t2)
+                image = torch.sqrt(init_mask) * noisy_init + torch.sqrt(1 - init_mask) * image
             yield {'sample': image, 'pred_xstart': pred_xstart}
