@@ -224,12 +224,4 @@ def run():
             final_name = f'samples/{timestring}_{k}_{title}.png'
             shutil.copyfile(filename, final_name)
 
-try:
-  run()
-  success = True
-except:
-  # Catch any exception to prevent leaking locals
-  import traceback
-  traceback.print_exc()
-  success = False
-assert success
+run()
