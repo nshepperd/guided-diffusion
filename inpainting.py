@@ -215,7 +215,6 @@ def run():
             grad = -torch.autograd.grad(loss, x)[0]
         # Gradient clipping before returning
         magnitude = grad.square().mean().sqrt()
-        print(f't={t}, magnitude={magnitude.item()}, variance={1 - diffusion.alpha(t)}, mask_loss={mask_losses.mean().item()}')
         return grad * magnitude.clamp(max=0.2) / magnitude
 
     for i in range(n_batches):
