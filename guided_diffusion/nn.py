@@ -151,20 +151,39 @@ class CheckpointFunction(th.autograd.Function):
 
     @staticmethod
     def backward(ctx, *output_grads):
-        ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+        input_indices = [(i, x) for (i, x) in enumerate(ctx.input_tensors + ctx.input_params) if x.requires_grad]
+        if not input_indices:
+            input_grads = tuple(None for _ in ctx.input_tensors + ctx.input_params)
+            del ctx.input_tensors
+            del ctx.input_params
+            return (None, None) + input_grads
+
+        # ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
         with th.enable_grad():
             # Fixes a bug where the first op in run_function modifies the
             # Tensor storage in place, which is not allowed for detach()'d
             # Tensors.
             shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
             output_tensors = ctx.run_function(*shallow_copies)
-        input_grads = th.autograd.grad(
-            output_tensors,
-            ctx.input_tensors + ctx.input_params,
-            output_grads,
-            allow_unused=True,
+        if isinstance(output_tensors, th.Tensor):
+            output_tensors = [output_tensors]
+
+        out_and_grads = [(o, g) for (o, g) in zip(output_tensors, output_grads) if o.requires_grad]
+        if not out_and_grads:
+            input_grads = tuple(None for _ in ctx.input_tensors + ctx.input_params)
+            del ctx.input_tensors
+            del ctx.input_params
+            return (None, None) + input_grads
+
+        computed_grads = th.autograd.grad(
+            [o for (o, g) in out_and_grads],
+            [x for (i, x) in input_indices],
+            [g for (o, g) in out_and_grads]
         )
+
+        input_grads = [None for _ in ctx.input_tensors + ctx.input_params]
+        for ((i, _), g) in zip(input_indices, computed_grads):
+            input_grads[i] = g
         del ctx.input_tensors
         del ctx.input_params
-        del output_tensors
-        return (None, None) + input_grads
+        return (None, None) + tuple(input_grads)
