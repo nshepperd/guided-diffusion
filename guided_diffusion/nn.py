@@ -143,47 +143,47 @@ class CheckpointFunction(th.autograd.Function):
     @staticmethod
     def forward(ctx, run_function, length, *args):
         ctx.run_function = run_function
-        ctx.input_tensors = list(args[:length])
-        ctx.input_params = list(args[length:])
+        ctx.input_length = length
+        ctx.save_for_backward(*args)
         with th.no_grad():
-            output_tensors = ctx.run_function(*ctx.input_tensors)
+            output_tensors = ctx.run_function(*args[:length])
         return output_tensors
 
     @staticmethod
     def backward(ctx, *output_grads):
-        input_indices = [(i, x) for (i, x) in enumerate(ctx.input_tensors + ctx.input_params) if x.requires_grad]
-        if not input_indices:
-            input_grads = tuple(None for _ in ctx.input_tensors + ctx.input_params)
-            del ctx.input_tensors
-            del ctx.input_params
-            return (None, None) + input_grads
+        args = list(ctx.saved_tensors)
 
-        # ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+        # Filter for inputs that require grad. If none, exit early.
+        input_indices = [i for (i, x) in enumerate(args) if x.requires_grad]
+        if not input_indices:
+            return (None, None) + tuple(None for _ in args)
+
         with th.enable_grad():
-            # Fixes a bug where the first op in run_function modifies the
-            # Tensor storage in place, which is not allowed for detach()'d
-            # Tensors.
-            shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
-            output_tensors = ctx.run_function(*shallow_copies)
+            for i in input_indices:
+                if i < ctx.input_length:
+                    # Not sure why the OAI code does this little
+                    # dance. It might not be necessary.
+                    args[i] = args[i].detach().requires_grad_()
+                    args[i] = args[i].view_as(args[i])
+            output_tensors = ctx.run_function(*args[:ctx.input_length])
+
         if isinstance(output_tensors, th.Tensor):
             output_tensors = [output_tensors]
 
+        # Filter for outputs that require grad. If none, exit early.
         out_and_grads = [(o, g) for (o, g) in zip(output_tensors, output_grads) if o.requires_grad]
         if not out_and_grads:
-            input_grads = tuple(None for _ in ctx.input_tensors + ctx.input_params)
-            del ctx.input_tensors
-            del ctx.input_params
-            return (None, None) + input_grads
+            return (None, None) + tuple(None for _ in args)
 
+        # Compute gradients on the filtered tensors.
         computed_grads = th.autograd.grad(
             [o for (o, g) in out_and_grads],
-            [x for (i, x) in input_indices],
+            [args[i] for i in input_indices],
             [g for (o, g) in out_and_grads]
         )
 
-        input_grads = [None for _ in ctx.input_tensors + ctx.input_params]
-        for ((i, _), g) in zip(input_indices, computed_grads):
+        # Reassemble the complete gradient tuple.
+        input_grads = [None for _ in args]
+        for (i, g) in zip(input_indices, computed_grads):
             input_grads[i] = g
-        del ctx.input_tensors
-        del ctx.input_params
         return (None, None) + tuple(input_grads)
