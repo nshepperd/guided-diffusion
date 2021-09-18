@@ -200,7 +200,7 @@ def run():
     for i in range(n_batches):
         timestring = time.strftime('%Y%m%d%H%M%S')
 
-        samples = diffusion.p_sample_loop_progressive(
+        samples = diffusion.ddim_sample_loop_progressive(
             model,
             (batch_size, 3, model_config['image_size'], model_config['image_size']),
             schedule = schedule,
@@ -217,11 +217,11 @@ def run():
                     pil_image = TF.to_pil_image(image.add(1).div(2).clamp(0, 1))
                     filename = f'progress/progress_{i * batch_size + k:05}_{j:04}.png'
                     pil_image.save(filename)
-                    pil_image.save(f'progress/progress_{i * batch_size + k:05}_last.png')
+                    pil_image.save(f'progress_{k:05}.png')
                     tqdm.write(f'Wrote batch {i}, step {j}, output {k} to {filename}')
 
         for k in range(batch_size):
-            filename = f'progress/progress_{i * batch_size + k:05}_last.png'
+            filename = f'progress/progress_{i * batch_size + k:05}_{j:04}.png'
             final_name = f'samples/{timestring}_{k}_{title}.png'
             shutil.copyfile(filename, final_name)
 
