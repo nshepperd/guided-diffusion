@@ -152,7 +152,7 @@ tv_scale = 150              # Controls the smoothness of the final output.
 eta = 1.1 # 0.0: ddim. 1.0: ddpm. between 1.0 and 2.0: extra noisy
 cutn = 64
 n_batches = 1
-init_image = 'https://media.discordapp.net/attachments/730484623028519072/886890032802181150/progress_00000.png'
+init_image = 'examples/goose_inpainted.png'
 skip_timesteps = 700  # This needs to be between approx. 200 and 500 when using an init image.
                       # Higher values make the output look more like the init.
 schedule = make_schedule(1000 - skip_timesteps, 0, 0.5)
