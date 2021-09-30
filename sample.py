@@ -197,6 +197,9 @@ def run():
         magnitude = grad.square().mean().sqrt()
         return grad * magnitude.clamp(max=0.2) / magnitude
 
+    def denoised_fn(image):
+        return image.clamp(-1, 1)
+
     for i in range(n_batches):
         timestring = time.strftime('%Y%m%d%H%M%S')
 
@@ -205,6 +208,7 @@ def run():
             (batch_size, 3, model_config['image_size'], model_config['image_size']),
             schedule = schedule,
             cond_fn = cond_fn,
+            denoised_fn = denoised_fn,
             init_image = init,
             eta=eta,
             progress = tqdm
