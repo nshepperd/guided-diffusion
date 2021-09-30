@@ -197,7 +197,7 @@ def run():
         magnitude = grad.square().mean().sqrt()
         return grad * magnitude.clamp(max=0.2) / magnitude
 
-    def denoised_fn(image):
+    def denoised_fn(image, t):
         return image.clamp(-1, 1)
 
     for i in range(n_batches):

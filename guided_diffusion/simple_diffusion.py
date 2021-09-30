@@ -162,7 +162,7 @@ class SimpleDiffusion(object):
         xstart = (x - np.sqrt(1 - a1) * eps) / np.sqrt(a1)
 
         if denoised_fn is not None:
-            xstart = denoised_fn(xstart)
+            xstart = denoised_fn(xstart, t1)
 
         ddpm_sigma2 = (1 - a1/a2) * (1 - a2) / (1 - a1)
 
