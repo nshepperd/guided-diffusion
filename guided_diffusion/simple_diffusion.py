@@ -138,7 +138,7 @@ class SimpleDiffusion(object):
         xstart = (x - np.sqrt(1 - a1) * eps) / np.sqrt(a1)
         return xstart
 
-    def ddim_sample(self, model, x, t1, t2, cond_fn=None, denoised_fn=None, noise=None, eta=1.0):
+    def ddim_sample(self, model, x, t1, t2, cond_fn=None, denoised_fn=None, noise=None, eta=1.0, denoised_before_cond=False):
         assert x.isfinite().all()
         assert t1 > t2
 
@@ -154,6 +154,11 @@ class SimpleDiffusion(object):
         if noise is None:
             noise = torch.randn_like(x)
 
+        if denoised_fn is not None and denoised_before_cond:
+            # Modify the pred with denoised_fn then get eps back out
+            xstart = denoised_fn(xstart0, t1)
+            eps = (x - xstart * np.sqrt(a1)) / np.sqrt(1 - a1)
+
         if cond_fn is not None:
             # Conditioning for DDIM: "Diffusion Models Beat GANs on Image Synthesis" page 7-8.
             eps = eps - np.sqrt(1 - a1) * cond_fn(x, t1)
@@ -161,7 +166,8 @@ class SimpleDiffusion(object):
         # "Denoising Diffusion Implicit Models" formula 12
         xstart = (x - np.sqrt(1 - a1) * eps) / np.sqrt(a1)
 
-        if denoised_fn is not None:
+        if denoised_fn is not None and not denoised_before_cond:
+            # Modify with denoised_fn
             xstart = denoised_fn(xstart, t1)
 
         ddpm_sigma2 = (1 - a1/a2) * (1 - a2) / (1 - a1)
@@ -201,7 +207,7 @@ class SimpleDiffusion(object):
 
 
     @torch.no_grad()
-    def ddim_sample_loop_progressive(self, model, shape, init_image=None, schedule=None, cond_fn=None, denoised_fn=None, eta=1.0, init_mask=None, progress=None):
+    def ddim_sample_loop_progressive(self, model, shape, init_image=None, schedule=None, cond_fn=None, denoised_fn=None, eta=1.0, init_mask=None, progress=None, denoised_before_cond=False):
         if schedule is None:
             schedule = reversed(range(self.diffusion_steps + 1)) # [T..0]
         schedule = list(schedule)
@@ -215,7 +221,7 @@ class SimpleDiffusion(object):
         for (t1, t2) in (progress(timesteps) if progress else timesteps):
             if t1 == t2:
                 continue
-            image, pred_xstart = self.ddim_sample(model, image, t1, t2, cond_fn=cond_fn, denoised_fn=denoised_fn, eta=eta)
+            image, pred_xstart = self.ddim_sample(model, image, t1, t2, cond_fn=cond_fn, denoised_fn=denoised_fn, eta=eta, denoised_before_cond=denoised_before_cond)
             if init_mask is not None and t2 > 0:
                 noisy_init = self.q_sample(init_image.broadcast_to(shape), 0, t2)
                 image = torch.sqrt(init_mask) * noisy_init + torch.sqrt(1 - init_mask) * image
